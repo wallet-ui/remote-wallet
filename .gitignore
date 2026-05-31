@@ -3,6 +3,8 @@
 *.tsbuildinfo
 dist
 node_modules
+playwright-report
+test-results
 
 # START Ruler Generated Files
 /.gemini/settings.json

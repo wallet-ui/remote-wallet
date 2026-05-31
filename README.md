@@ -1,47 +1,55 @@
 # remote-wallet
 
-TypeScript library built with [Bun](https://bun.sh/), [tsdown](https://tsdown.js.org/), [Biome](https://biomejs.dev/), and [Changesets](https://github.com/changesets/changesets).
-
-## Features
-
-- Bun-first dependency management, scripts, and tests
-- TypeScript source with dual ESM/CJS output and generated types
-- Biome for linting and formatting
-- Example library export and CLI entrypoint
-- Changesets and GitHub Actions for release automation
-
-## Installation
-
-```bash
-bun install
-```
-
-## Usage
-
-```ts
-import { greet } from 'remote-wallet'
-
-console.log(greet('Seed'))
-```
+`remote-wallet` is an agent-friendly Solana wallet CLI and protocol toolkit. It lets a dapp expose a copyable remote wallet Pairing URL, then lets an agent connect from a terminal and sign on behalf of the configured wallet key.
 
 ## CLI
 
 ```bash
-bun run src/cli.ts
-bun run src/cli.ts Seed
+bunx remote-wallet "<pairing-url>"
+```
+
+Useful options:
+
+```bash
+remote-wallet --url "<pairing-url>" --label "Agent Remote Wallet"
+remote-wallet --url "<pairing-url>" --rpc-url https://api.devnet.solana.com
+remote-wallet --url "<pairing-url>" --secret-key "$REMOTE_WALLET_SECRET_KEY"
+```
+
+## Browser
+
+```ts
+import { createRemoteWalletSession } from 'remote-wallet/browser'
+```
+
+## Node
+
+```ts
+import { createRemoteWalletSigner } from 'remote-wallet/node'
+```
+
+## Protocol
+
+```ts
+import { parseNostrAssociationUrl } from 'remote-wallet/protocol'
+```
+
+## React
+
+```tsx
+import { RemoteWalletPairingPanel, useRemoteWalletPairing } from 'remote-wallet/react'
 ```
 
 ## Development
 
 ```bash
+bun install
 bun run build
 bun run check-types
 bun run lint
-bun run lint:fix
 bun test
-bun run test:watch
 ```
 
 ## License
 
-MIT – see [LICENSE](./LICENSE).
+MIT. See [LICENSE](./LICENSE).

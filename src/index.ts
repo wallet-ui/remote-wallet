@@ -1,3 +1,2 @@
-export function greet(name: string = 'World'): string {
-  return `Hello, ${name} from remote-wallet!`
-}
+export type { CreateRemoteWalletSignerOptions, RemoteWalletSigner } from './node/index.ts'
+export * from './protocol/index.ts'

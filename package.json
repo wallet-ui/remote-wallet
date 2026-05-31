@@ -1,26 +1,55 @@
 {
   "bin": {
-    "remote-wallet": "dist/cli.mjs"
+    "remote-wallet": "dist/bin/remote-wallet.mjs"
   },
-  "dependencies": {},
-  "description": "TypeScript library and CLI for remote wallet workflows.",
+  "dependencies": {
+    "@noble/curves": "^1.9.7",
+    "@noble/hashes": "^1.8.0",
+    "@solana/kit": "^6.8.0"
+  },
+  "description": "Agent-friendly CLI and protocol helpers for Solana remote wallet pairing",
   "devDependencies": {
+    "@beeman/testcontainers": "1.2.3",
     "@biomejs/biome": "2.4.6",
     "@changesets/cli": "2.30.0",
     "@intellectronica/ruler": "0.3.38",
+    "@playwright/test": "1.60.0",
+    "@solana/kit-plugins": "^0.3.0",
     "@types/bun": "1.3.13",
+    "@types/react": "^19.2.7",
     "lefthook": "2.1.5",
     "pkg-pr-new": "0.0.62",
     "publint": "0.3.18",
+    "react": "^19.2.0",
+    "testcontainers": "12.0.0",
     "tsdown": "0.21.7",
     "typescript": "6.0.2"
   },
   "exports": {
     ".": {
-      "import": {
-        "types": "./dist/index.d.mts",
-        "default": "./dist/index.mjs"
-      }
+      "types": "./dist/index.d.mts",
+      "import": "./dist/index.mjs",
+      "default": "./dist/index.mjs"
+    },
+    "./browser": {
+      "types": "./dist/browser/index.d.mts",
+      "import": "./dist/browser/index.mjs",
+      "default": "./dist/browser/index.mjs"
+    },
+    "./node": {
+      "types": "./dist/node/index.d.mts",
+      "import": "./dist/node/index.mjs",
+      "default": "./dist/node/index.mjs"
+    },
+    "./protocol": {
+      "types": "./dist/protocol/index.d.mts",
+      "import": "./dist/protocol/index.mjs",
+      "default": "./dist/protocol/index.mjs"
+    },
+    "./react": {
+      "types": "./dist/react/index.d.mts",
+      "import": "./dist/react/index.mjs",
+      "default": "./dist/react/index.mjs"
     }
   },
   "files": [
@@ -30,6 +59,14 @@
   "main": "./dist/index.mjs",
   "module": "./dist/index.mjs",
   "name": "remote-wallet",
+  "peerDependencies": {
+    "react": ">=18"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    }
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/wallet-ui/remote-wallet.git"
@@ -44,8 +81,9 @@
     "prepare": "lefthook install",
     "release": "changeset publish",
     "ruler:apply": "ruler apply --local-only",
-    "test": "bun test test/*.test.ts",
-    "test:watch": "bun test test/*.test.ts --watch",
+    "test": "bun test test/**/*.test.ts",
+    "test:e2e": "playwright test",
+    "test:watch": "bun test test/**/*.test.ts --watch",
     "version": "changeset version && bun lint:fix"
   },
   "type": "module",
