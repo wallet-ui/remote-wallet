@@ -1,0 +1,88 @@
+name: Publish
+
+concurrency:
+  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.ref }}
+
+on:
+  push:
+    branches:
+      - main
+
+jobs:
+  check-changesets:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    outputs:
+      has_changesets: ${{ steps.check.outputs.has_changesets }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Check for changesets
+        id: check
+        run: |
+          if ls .changeset/*.md 2>/dev/null | grep -qv 'README.md'; then
+            echo "has_changesets=true" >> $GITHUB_OUTPUT
+          else
+            echo "has_changesets=false" >> $GITHUB_OUTPUT
+          fi
+
+  publish:
+    if: github.ref == 'refs/heads/main'
+    permissions:
+      contents: write
+      id-token: write
+      pull-requests: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Environment
+        uses: ./.github/actions/setup
+
+      - name: Build
+        run: bun run build
+
+      - name: Check package
+        run: bun x publint
+
+      - name: Publish to NPM
+        uses: changesets/action@63a615b9cd06ba9a3e6d13796c7fbcb080a60a0b # v1.8.0
+        with:
+          commit: "chore: update versions"
+          publish: npm run release
+          title: "chore: update versions"
+          version: bun run version
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_CONFIG_PROVENANCE: true
+
+  canary:
+    needs: check-changesets
+    if: github.ref == 'refs/heads/main' && needs.check-changesets.outputs.has_changesets == 'true'
+    permissions:
+      contents: read
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Environment
+        uses: ./.github/actions/setup
+
+      - name: Build
+        run: bun run build
+
+      - name: Check package
+        run: bun x publint
+
+      - name: Create canary version
+        run: bun x changeset version --snapshot canary
+
+      - name: Publish canary to NPM
+        run: bun x changeset publish --tag canary
+        env:
+          NPM_CONFIG_PROVENANCE: true
