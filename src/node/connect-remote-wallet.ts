@@ -21,6 +21,8 @@ import {
 import { sendSignedTransaction } from './send-signed-transaction.ts'
 import { createRemoteWalletAuthorizationAccount, getSolanaRpcUrl, type RemoteWalletSigner } from './signer.ts'
 
+const MIN_WALLET_HELLO_REQ_TIMEOUT_MS = 10_000
+
 type SessionState =
   | {
       lastInboundSequenceNumber: number
@@ -60,10 +62,11 @@ export async function connectRemoteWallet({ pairing, signer, timeoutMs, writeEve
       closed = true
       socket.close()
     }
+    const helloRequestTimeoutMs = Math.max(timeoutMs, MIN_WALLET_HELLO_REQ_TIMEOUT_MS)
     const timeoutId = setTimeout(() => {
       closeSocket()
-      reject(new Error(`Timed out waiting for dapp handshake after ${timeoutMs}ms`))
-    }, timeoutMs)
+      reject(new Error(`Timed out waiting for dapp handshake after ${helloRequestTimeoutMs}ms`))
+    }, helloRequestTimeoutMs)
     const cleanup = () => {
       clearTimeout(timeoutId)
       socket.removeEventListener('close', handleClose)
@@ -120,9 +123,17 @@ export async function connectRemoteWallet({ pairing, signer, timeoutMs, writeEve
       try {
         const message = parseNostrRelayMessage(event.data)
 
+        if (message?.[0] === 'CLOSED' && message[1] === subscriptionId) {
+          failSession(new Error(`Nostr relay ${pairing.relayDomain} closed subscription: ${String(message[2] ?? '')}`))
+          return
+        }
         if (message?.[0] === 'EOSE' && message[1] === subscriptionId) {
           sendNostrEvent('', pairing.dappNostrPubkey, [['msg', 'CONNECT']])
           writeEvent?.('wallet-joined', {})
+          return
+        }
+        if (message?.[0] === 'OK' && message[2] === false) {
+          failSession(new Error(`Nostr relay ${pairing.relayDomain} rejected event: ${String(message[3] ?? '')}`))
           return
         }
         if (message?.[0] === 'NOTICE') {
@@ -213,6 +224,11 @@ export async function connectRemoteWallet({ pairing, signer, timeoutMs, writeEve
         closeSocket()
         reject(error)
       }
+    }
+    const failSession = (error: Error) => {
+      cleanup()
+      closeSocket()
+      reject(error)
     }
     const handleOpen = () => {
       socket.send(

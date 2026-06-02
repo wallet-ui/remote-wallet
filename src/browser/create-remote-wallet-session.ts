@@ -15,6 +15,7 @@ import { base64ToBytes, bytesToBase58, bytesToBase64 } from '../protocol/encodin
 import {
   createNostrAssociationUrl,
   createNostrEvent,
+  deriveNostrSessionIdentifier,
   generateNostrKeypair,
   getNostrEventTags,
   isNostrEvent,
@@ -23,6 +24,9 @@ import {
 } from '../protocol/index.ts'
 
 export const REMOTE_WALLET_PAIRING_TTL_MS = 60_000
+
+const MIN_DAPP_CONNECT_TIMEOUT_MS = 30_000
+const remoteWalletSessionRuntimeOptions = new WeakMap<RemoteWalletPairingSession, RemoteWalletSessionRuntimeOptions>()
 
 type ProtocolVersion = 'legacy' | 'v1'
 
@@ -135,6 +139,11 @@ export interface RemoteWalletPairingSession {
   status: RemoteWalletPairingStatus
 }
 
+interface RemoteWalletSessionRuntimeOptions {
+  identity?: RemoteWalletIdentity
+  onStatusChange?: (status: RemoteWalletPairingStatus) => void
+}
+
 export type RemoteWalletPairingStatus =
   | 'authorizing'
   | 'cancelled'
@@ -200,6 +209,7 @@ export interface RemoteWalletSignTransactionOutput {
 }
 
 class RemoteWalletRpcClient {
+  readonly #getIdentity: () => RemoteWalletIdentity
   readonly #getNextJsonRpcMessageId: () => number
   readonly #pendingRequests = new Map<
     number,
@@ -215,18 +225,21 @@ class RemoteWalletRpcClient {
   readonly #walletNostrPubkey: string
 
   constructor({
+    getIdentity,
     getNextJsonRpcMessageId,
     sendNostrEvent,
     sharedSecret,
     timeoutMs,
     walletNostrPubkey,
   }: {
+    getIdentity: () => RemoteWalletIdentity
     getNextJsonRpcMessageId: () => number
     sendNostrEvent: (content: string, recipientPubkey: string) => void
     sharedSecret: CryptoKey
     timeoutMs: number
     walletNostrPubkey: string
   }) {
+    this.#getIdentity = getIdentity
     this.#getNextJsonRpcMessageId = getNextJsonRpcMessageId
     this.#sendNostrEvent = sendNostrEvent
     this.#sharedSecret = sharedSecret
@@ -299,6 +312,7 @@ class RemoteWalletRpcClient {
   async signIn(chain: string, protocolVersion: ProtocolVersion, input?: RemoteWalletSignInInput) {
     return authorizeRemoteWallet({
       chain,
+      getIdentity: this.#getIdentity,
       protocolVersion,
       rpcClient: this,
       signInPayload: normalizeRemoteWalletSignInPayload(input),
@@ -342,22 +356,19 @@ class RemoteWalletRpcClient {
 }
 
 export async function connectRemoteWalletSession({
-  identity = getDefaultIdentity(),
+  identity,
   onStatusChange,
   session,
   timeoutMs = REMOTE_WALLET_PAIRING_TTL_MS,
-}: ConnectRemoteWalletSessionOptions) {
-  if (session.authorizedSession) {
-    return session.authorizedSession
+}: ConnectRemoteWalletSessionOptions): Promise<RemoteWalletAuthorizedSession> {
+  setRemoteWalletSessionRuntimeOptions(session, { identity, onStatusChange })
+  await prepareRemoteWalletSession({ session, timeoutMs: getDappConnectTimeoutMs(timeoutMs) })
+
+  if (!session.authorizedSession) {
+    throw new Error('Remote Wallet session was not prepared')
   }
 
-  const relay = await connectToNostrRelay({ identity, onStatusChange, session, timeoutMs })
-
-  session.authorizedSession = relay.authorizedSession
-  session.cancel = relay.close
-  session.close = relay.close
-
-  return relay.authorizedSession
+  return session.authorizedSession
 }
 
 export async function createRemoteWalletSession({
@@ -372,7 +383,8 @@ export async function createRemoteWalletSession({
   const chain = chains[0] ?? 'solana:devnet'
   const { privateKey: dappNostrPrivateKey, publicKey: dappNostrPubkey } = generateNostrKeypair()
   const relay = normalizeRelayUrl(relayUrl)
-  const sessionIdentifier = crypto.randomUUID()
+  const sessionIdentifier = deriveNostrSessionIdentifier(associationPublicKey)
+  const effectiveTimeoutMs = getDappConnectTimeoutMs(timeoutMs)
   const session: RemoteWalletPairingSession = {
     associationKeyPair,
     cancel() {
@@ -385,12 +397,11 @@ export async function createRemoteWalletSession({
     connect: (options = {}) => connectRemoteWalletSession({ ...options, session }),
     dappNostrPrivateKey,
     dappNostrPubkey,
-    expiresAt: new Date(Date.now() + timeoutMs).toISOString(),
+    expiresAt: new Date(Date.now() + effectiveTimeoutMs).toISOString(),
     pairingUrl: createNostrAssociationUrl({
       associationPublicKey,
       dappNostrPubkey,
       relayUrl: relay,
-      sessionIdentifier,
     }),
     relayDomain: new URL(relay).host,
     relayUrl: relay,
@@ -398,11 +409,11 @@ export async function createRemoteWalletSession({
     status: 'waiting-for-wallet',
   }
 
-  if (connect) {
-    const authorizedSession = connectRemoteWalletSession({ identity, session, timeoutMs })
+  setRemoteWalletSessionRuntimeOptions(session, { identity })
+  await prepareRemoteWalletSession({ session, timeoutMs: effectiveTimeoutMs })
 
-    void authorizedSession.catch(() => undefined)
-    session.authorizedSession = authorizedSession
+  if (connect) {
+    void session.authorizedSession?.catch(() => undefined)
   }
 
   return session
@@ -410,11 +421,13 @@ export async function createRemoteWalletSession({
 
 async function authorizeRemoteWallet({
   chain,
+  getIdentity,
   protocolVersion,
   rpcClient,
   signInPayload,
 }: {
   chain: string
+  getIdentity: () => RemoteWalletIdentity
   protocolVersion: ProtocolVersion
   rpcClient: RemoteWalletRpcClient
   signInPayload?: RemoteWalletSignInInput
@@ -424,7 +437,7 @@ async function authorizeRemoteWallet({
   return rpcClient.request<RemoteWalletAuthorizationResult>('authorize', {
     ...(protocolVersion === 'legacy' && legacyCluster ? { cluster: legacyCluster } : null),
     chain,
-    identity: getDefaultIdentity(),
+    identity: getIdentity(),
     ...(signInPayload ? { sign_in_payload: signInPayload } : null),
   })
 }
@@ -442,14 +455,37 @@ function chainToLegacyCluster(chain: string) {
   }
 }
 
-function connectToNostrRelay({
-  identity,
-  onStatusChange,
+async function prepareRemoteWalletSession({
   session,
   timeoutMs,
 }: {
-  identity: RemoteWalletIdentity
-  onStatusChange?: (status: RemoteWalletPairingStatus) => void
+  session: RemoteWalletPairingSession
+  timeoutMs: number
+}) {
+  if (session.authorizedSession) {
+    return
+  }
+
+  const relay = await connectToNostrRelay({
+    getIdentity: () => remoteWalletSessionRuntimeOptions.get(session)?.identity ?? getDefaultIdentity(),
+    getOnStatusChange: () => remoteWalletSessionRuntimeOptions.get(session)?.onStatusChange,
+    session,
+    timeoutMs,
+  })
+
+  session.authorizedSession = relay.authorizedSession
+  session.cancel = relay.close
+  session.close = relay.close
+}
+
+function connectToNostrRelay({
+  getIdentity,
+  getOnStatusChange,
+  session,
+  timeoutMs,
+}: {
+  getIdentity: () => RemoteWalletIdentity
+  getOnStatusChange: () => ((status: RemoteWalletPairingStatus) => void) | undefined
   session: RemoteWalletPairingSession
   timeoutMs: number
 }) {
@@ -477,7 +513,7 @@ function connectToNostrRelay({
     }, timeoutMs)
     const setStatus = (status: RemoteWalletPairingStatus) => {
       setSessionStatus(session, status)
-      onStatusChange?.(status)
+      getOnStatusChange()?.(status)
     }
     const rejectAuthorization = (error: Error) => {
       if (state.type === 'connected') {
@@ -563,8 +599,16 @@ function connectToNostrRelay({
     const handleMessage = async (event: MessageEvent<string>) => {
       const message = parseNostrRelayMessage(event.data)
 
+      if (message?.[0] === 'CLOSED' && message[1] === subscriptionId) {
+        failSession(new Error(`Nostr relay ${session.relayDomain} closed subscription: ${String(message[2] ?? '')}`))
+        return
+      }
       if (message?.[0] === 'EOSE' && message[1] === subscriptionId) {
         resolveSubscription()
+        return
+      }
+      if (message?.[0] === 'OK' && message[2] === false) {
+        failSession(new Error(`Nostr relay ${session.relayDomain} rejected event: ${String(message[3] ?? '')}`))
         return
       }
       if (message?.[0] !== 'EVENT') {
@@ -634,6 +678,7 @@ function connectToNostrRelay({
 
             setStatus('authorizing')
             const rpcClient = new RemoteWalletRpcClient({
+              getIdentity,
               getNextJsonRpcMessageId: () => nextJsonRpcMessageId++,
               sendNostrEvent,
               sharedSecret,
@@ -648,7 +693,7 @@ function connectToNostrRelay({
                 ? { cluster: chainToLegacyCluster(session.chain) }
                 : null),
               chain: session.chain,
-              identity,
+              identity: getIdentity(),
             })
             let accounts = authorizationResult.accounts.map((account) => mapRemoteWalletAccount(account, session.chain))
             let authToken = authorizationResult.auth_token
@@ -700,7 +745,7 @@ function connectToNostrRelay({
             break
           }
           case 'subscribed': {
-            if (nostrEvent.content.length !== 0) {
+            if (nostrEvent.content.length !== 0 || !eventTags.msg?.includes('CONNECT')) {
               return
             }
 
@@ -723,6 +768,19 @@ function connectToNostrRelay({
         rejectAuthorization(error instanceof Error ? error : new Error(String(error)))
         close()
       }
+    }
+    const failSession = (error: Error) => {
+      cleanup()
+
+      if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+        socket.close()
+      }
+      if (!settled) {
+        reject(error)
+        return
+      }
+
+      rejectAuthorization(error)
     }
 
     socket.addEventListener('close', handleClose)
@@ -757,6 +815,10 @@ function getDefaultIdentity(): RemoteWalletIdentity {
     name: browserGlobal.document?.title || 'Remote Wallet Dapp',
     uri: browserGlobal.location?.origin || 'https://remote-wallet.local',
   }
+}
+
+function getDappConnectTimeoutMs(timeoutMs: number) {
+  return Math.max(timeoutMs, MIN_DAPP_CONNECT_TIMEOUT_MS)
 }
 
 function getRemoteWalletAuthorizedAccount(
@@ -846,6 +908,18 @@ async function parseSessionProtocolVersion(message: Uint8Array, sharedSecret: Cr
     default:
       throw new Error(`Unknown/unsupported protocol version: ${String(jsonProperties.v)}`)
   }
+}
+
+function setRemoteWalletSessionRuntimeOptions(
+  session: RemoteWalletPairingSession,
+  options: RemoteWalletSessionRuntimeOptions,
+) {
+  const currentOptions = remoteWalletSessionRuntimeOptions.get(session) ?? {}
+
+  remoteWalletSessionRuntimeOptions.set(session, {
+    identity: options.identity ?? currentOptions.identity,
+    onStatusChange: options.onStatusChange ?? currentOptions.onStatusChange,
+  })
 }
 
 function setSessionStatus(session: RemoteWalletPairingSession, status: RemoteWalletPairingStatus) {

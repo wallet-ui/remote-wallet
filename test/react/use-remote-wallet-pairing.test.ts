@@ -16,27 +16,63 @@ describe('React pairing helpers', () => {
         `../../src/react/use-remote-wallet-pairing.ts?test=${crypto.randomUUID()}`
       )
 
-      const firstHook = react.render(() => useRemoteWalletPairing())
-      const firstSession = await firstHook.startPairing()
-      const firstCancel = mock(() => {})
-      firstSession.cancel = firstCancel
+      await withMockWebSocket(async ({ sockets }) => {
+        const firstHook = react.render(() => useRemoteWalletPairing('wss://relay.example.com'))
+        const firstSessionPromise = firstHook.startPairing()
+        const firstSocket = await waitForSocket(sockets, 0)
 
-      const secondHook = react.render(() => useRemoteWalletPairing())
-      const secondSession = await secondHook.startPairing()
-      const secondCancel = mock(() => {})
-      secondSession.cancel = secondCancel
+        resolveSubscription(firstSocket)
 
-      expect(firstCancel).toHaveBeenCalledTimes(1)
+        const firstSession = await firstSessionPromise
+        const firstCancel = mock(() => {})
+        firstSession.cancel = firstCancel
 
-      react.render(() => useRemoteWalletPairing())
-      react.unmount()
+        const secondHook = react.render(() => useRemoteWalletPairing('wss://relay.example.com'))
+        const secondSessionPromise = secondHook.startPairing()
+        const secondSocket = await waitForSocket(sockets, 1)
 
-      expect(secondCancel).toHaveBeenCalledTimes(1)
+        resolveSubscription(secondSocket)
+
+        const secondSession = await secondSessionPromise
+        const secondCancel = mock(() => {})
+        secondSession.cancel = secondCancel
+
+        expect(firstCancel).toHaveBeenCalledTimes(1)
+
+        react.render(() => useRemoteWalletPairing('wss://relay.example.com'))
+        react.unmount()
+
+        expect(secondCancel).toHaveBeenCalledTimes(1)
+      })
     } finally {
       mock.restore()
     }
   })
 })
+
+class MockWebSocket extends EventTarget {
+  static readonly CLOSED = 3
+  static readonly CLOSING = 2
+  static readonly CONNECTING = 0
+  static readonly OPEN = 1
+
+  readonly sentMessages: string[] = []
+  readyState = MockWebSocket.CONNECTING
+
+  close() {
+    this.readyState = MockWebSocket.CLOSED
+    this.dispatchEvent(new Event('close'))
+  }
+
+  open() {
+    this.readyState = MockWebSocket.OPEN
+    this.dispatchEvent(new Event('open'))
+  }
+
+  send(message: string) {
+    this.sentMessages.push(message)
+  }
+}
 
 type EffectCleanup = undefined | (() => void)
 type StateUpdater<T> = T | ((previous: T) => T)
@@ -108,5 +144,49 @@ function createTestReactRuntime() {
         cleanup?.()
       }
     },
+  }
+}
+
+function getSubscriptionRequest(socket: MockWebSocket) {
+  return JSON.parse(socket.sentMessages[0] ?? '[]') as ['REQ', string, { '#d': string[]; kinds: number[] }]
+}
+
+function resolveSubscription(socket: MockWebSocket) {
+  socket.open()
+
+  const request = getSubscriptionRequest(socket)
+
+  socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(['EOSE', request[1]]) }))
+}
+
+async function waitForSocket(sockets: MockWebSocket[], index: number) {
+  for (let attempts = 0; attempts < 20; attempts++) {
+    const socket = sockets[index]
+
+    if (socket) {
+      return socket
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 0))
+  }
+
+  throw new Error(`Expected pairing to open WebSocket ${index}`)
+}
+
+async function withMockWebSocket(testFn: (context: { sockets: MockWebSocket[] }) => Promise<void>) {
+  const originalWebSocket = globalThis.WebSocket
+  const sockets: MockWebSocket[] = []
+
+  globalThis.WebSocket = class extends MockWebSocket {
+    constructor() {
+      super()
+      sockets.push(this)
+    }
+  } as unknown as typeof WebSocket
+
+  try {
+    await testFn({ sockets })
+  } finally {
+    globalThis.WebSocket = originalWebSocket
   }
 }

@@ -1,4 +1,5 @@
 export interface PairingDetails {
+  associationMode: 'local' | 'remote'
   associationPublicKey: Uint8Array
   dappNostrPubkey: string
   relayDomain: string
